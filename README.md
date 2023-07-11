@@ -15,6 +15,7 @@ T stands for TABLE, and also TOOL. This is a T-Machine code example:
 |---------|-----------------------------------|
 | E       | Extrude millimeters               |
 | R       | Rotate degrees                    |
+| T       | Temporize milliseconds            |
 | P       | Power up/down tool                |
 | S       | Tool speed in rpm                 |
 | J       | Jump anchor for flow control      |

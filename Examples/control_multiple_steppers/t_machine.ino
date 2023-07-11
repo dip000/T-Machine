@@ -51,15 +51,13 @@ void t_runProgram(String program){
   _progCounter = 0;
 }
 
-
 void t_handle(){
   // Update time and wait until the interpreter finishes its current job
-  static unsigned long waitTime = 0;
   static unsigned long previousTime = 0;
   static bool feedQueued = false;
 
-  if( waitTime > 0 ){
-    waitTime -= millis() - previousTime;
+  if( t_waitTime > 0 ){
+    t_waitTime -= millis() - previousTime;
     previousTime = millis();
     return;
   }
@@ -69,14 +67,14 @@ void t_handle(){
   // Feeds are flow control processes (loops, functions, ..) that aren't read continuously from the main program
   if( feedQueued ){
     feedQueued = false;
-    for(int tool=0; tool<_tools; tool++){
-      char* argument = nextFromFeed(tool);
+    for(uint8_t tool=0; tool<_tools; tool++){
+      char* argument = _nextFromFeed(tool);
       if( argument != ""){
         feedQueued = true;
         _execute( argument, tool );
       }
     }
-    waitTime = t_onSynchronusWait();
+    t_waitTime = t_onSynchronusWait();
     previousTime = millis();
     return;
   }
@@ -102,16 +100,16 @@ void t_handle(){
   
   if( endOfLine ){
     // If feeds were found, sinchronize times in the next loop
-    feedQueued = isFeedInQueue();
+    feedQueued = _isFeedInQueue();
     if( !feedQueued ){
-      waitTime = t_onSynchronusWait();
+      t_waitTime = t_onSynchronusWait();
       previousTime = millis();
     }
   }
 }
 
 
-void _streamBuffer(uint8_t c, bool &endOfArgument, bool &endOfLine, uint8_t &tool){
+void _streamBuffer(char c, bool &endOfArgument, bool &endOfLine, uint8_t &tool){
   static uint8_t argc = 0;
   static uint8_t charc = 0;
 
@@ -119,8 +117,8 @@ void _streamBuffer(uint8_t c, bool &endOfArgument, bool &endOfLine, uint8_t &too
   if(c=='\r')
     return;
 
-  // A space is a change in argument, 'argc' must not be higher than what the buffer can hold plus a null terminator character
-  if( c==' ' ){
+  // A space or tab is a change in argument, 'argc' must not be higher than what the buffer can hold plus a null terminator character
+  if( c==' ' || c== '\t' ){
     if( argc+1 > BUFFER_CHAR_SIZE )
       return;
     endOfArgument = true;
@@ -142,12 +140,12 @@ void _streamBuffer(uint8_t c, bool &endOfArgument, bool &endOfLine, uint8_t &too
   }  
 }
 
-void _execute(char* argument, int tool){
+void _execute(char* argument, uint8_t tool){
   if( tool >= _tools )
     return;
 
   float value;
-  uint8_t action;
+  char action;
   
   // Defaults to synchronus if not explicited
   if( argument[0] == ASYNCHRONUS ){
@@ -162,29 +160,48 @@ void _execute(char* argument, int tool){
   }
 
   // Sets speed after action so it can calculate the time accurately and be consistent
+  // Not every action can be stashed due unimplemented nested memory allocations
   switch( action ){
     case EXTRUDE:
-      t_onExtrudeChanged( value, tool );
-      t_onSpeedChanged( _speeds[tool] , tool );
+      if( t_onExtrudeChanged )
+        t_onExtrudeChanged( value, tool );
+      if( t_onSpeedChanged )
+        t_onSpeedChanged( _speeds[tool] , tool );
       if( _stashes[tool].stashing )
-        stash( argument, tool);
+        _stash( argument, tool);
       break;
+      
     case ROTATE:
-      t_onRotationChanged( value, tool );
-      t_onSpeedChanged( _speeds[tool] , tool );
+      if( t_onRotationChanged )
+        t_onRotationChanged( value, tool );
+      if( t_onSpeedChanged )
+        t_onSpeedChanged( _speeds[tool] , tool );
       if( _stashes[tool].stashing )
-        stash( argument, tool);
+        _stash( argument, tool);
       break;
+      
     case SPEED:
       _speeds[tool] = value;
-      t_onSpeedChanged( value, tool );
+      if( t_onSpeedChanged )
+        t_onSpeedChanged( value, tool );
       if( _stashes[tool].stashing )
-        stash( argument, tool);
+        _stash( argument, tool);
       break;
-    case POWER:
-      t_onPowerChanged( value , tool );
+      
+    case TIME:
+      if( t_onTimeChanged )
+        t_onTimeChanged( value, tool );
+      if( t_onSpeedChanged )
+        t_onSpeedChanged( _speeds[tool] , tool );
       if( _stashes[tool].stashing )
-        stash( argument, tool);
+        _stash( argument, tool);
+      break;
+      
+    case POWER:
+      if( t_onPowerChanged )
+        t_onPowerChanged( (value>0) , tool ); //true=ON, false=OFF
+      if( _stashes[tool].stashing )
+        _stash( argument, tool);
       break;
       
     case LAND:
@@ -196,30 +213,35 @@ void _execute(char* argument, int tool){
       _stashes[tool].stashing = false;
       _stashes[tool].feeding = true;
       _stashes[tool].loops = value;
-      //debugStash( tool );
+      //_debugStash( tool );
       break;
+
+    case _IDLE:
+      //Idle instructions are stashable. Otherwise, feeds wouldn't skip tools after inputing something like "* * * R90"
+      if( _stashes[tool].stashing )
+        _stash( argument, tool);
   }
 }
 
-void stash(char* argument, uint8_t tool){
+void _stash(char* argument, uint8_t tool){
   //No need to clear stashes because 1) The buffer it was copied from was already cleared. 2) 'stash.count' limits the total actual usable arguments
   memcpy( _stashes[tool].s[_stashes[tool].count++], argument, BUFFER_CHAR_SIZE );
 }
 
-void debugStash(uint8_t tool){
+void _debugStash(uint8_t tool){
   Serial.println("______Stashes:");
-  for(int i=0; i<_tools; i++){
+  for(uint8_t i=0; i<_tools; i++){
     Serial.print("______"); Serial.println(_stashes[tool].s[i]);
   }
 }
 
 // Iterator to fetch the next argument inside given stash. If there are no more arguments, returns false
-char* nextFromFeed(uint8_t tool){
-  bool indexIsOutOfReach = (_stashes[tool].index >= _stashes[tool].count);  
+char* _nextFromFeed(uint8_t tool){
   if( !_stashes[tool].feeding )
     return "";
   
   // Restart index if there are more loops
+  bool indexIsOutOfReach = (_stashes[tool].index >= _stashes[tool].count);  
   if( indexIsOutOfReach ){
     _stashes[tool].loops--;
     _stashes[tool].index = 0;
@@ -232,14 +254,14 @@ char* nextFromFeed(uint8_t tool){
   return _stashes[tool].s[ _stashes[tool].index++ ];
 }
 
-bool isFeedInQueue(){
-  for(int tool=0; tool<_tools; tool++)
+bool _isFeedInQueue(){
+  for(uint8_t tool=0; tool<_tools; tool++)
     if( _stashes[tool].feeding )
       return true;
   return false;
 }
 
 void _clearBuffer(char* buff){
-  for(int i=0; i<BUFFER_CHAR_SIZE; i++)
+  for(uint8_t i=0; i<BUFFER_CHAR_SIZE; i++)
     buff[i] = '\0';
 }
